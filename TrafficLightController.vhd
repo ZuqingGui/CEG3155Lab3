@@ -1,0 +1,287 @@
+LIBRARY ieee;
+USE ieee.std_logic_1164.ALL;
+
+ENTITY TrafficLightController IS
+	PORT(
+		i_reset: IN	STD_LOGIC;
+		i_clock: IN	STD_LOGIC;
+        i_carSensor: IN STD_LOGIC;
+        i_SSCmax: IN STD_LOGIC_VECTOR(3 downto 0);
+        i_MSCmax: IN STD_LOGIC_VECTOR(3 downto 0);
+		o_main: OUT STD_LOGIC_VECTOR(2 downto 0);
+        o_side: OUT STD_LOGIC_VECTOR(2 downto 0);
+        o_currentState: OUT STD_LOGIC_VECTOR(1 downto 0);
+        o_sevenSegMainA,o_sevenSegMainB,o_sevenSegMainC,o_sevenSegMainD,o_sevenSegMainE,o_sevenSegMainF,o_sevenSegMainG: OUT STD_LOGIC_VECTOR(1 downto 0);
+        o_sevenSegSideA,o_sevenSegSideB,o_sevenSegSideC,o_sevenSegSideD,o_sevenSegSideE,o_sevenSegSideF,o_sevenSegSideG: OUT STD_LOGIC_VECTOR(1 downto 0);
+        --outputs of counters for testing purposes
+        o_MSC,o_SSC: OUT STD_LOGIC_VECTOR(3 downto 0);
+		  o_MT,o_SST: OUT STD_LOGIC_VECTOR(1 downto 0);
+		  o_enableMSC,o_enableMT,o_enableSSC,o_enableSST,o_MSCmem,o_SSCmem: OUT STD_LOGIC);
+END TrafficLightController;
+
+ARCHITECTURE rtl OF TrafficLightController IS
+    SIGNAL int_gClock: STD_LOGIC;
+    SIGNAL int_debouncedSSCS: STD_LOGIC;
+	SIGNAL int_SSCounter,int_MSCounter: STD_LOGIC_VECTOR(3 downto 0);
+    SIGNAL int_MTCounter,int_SSTCounter: STD_LOGIC_VECTOR(1 downto 0);
+    SIGNAL int_SSCEqual,int_MSCEqual,int_SSCmem,int_MSCmem,int_MT,int_SST: STD_LOGIC;
+    SIGNAL int_enableSSC,int_enableMSC,int_enableMT,int_enableSST: STD_LOGIC;
+    SIGNAL int_main,int_side: STD_LOGIC_VECTOR(2 downto 0);
+    SIGNAL int_BCDMain,int_BCDSide: STD_LOGIC_VECTOR(3 downto 0);
+    --The current state signal is only used for testing purposes
+    SIGNAL int_currentState: STD_LOGIC_VECTOR(1 downto 0);
+
+    COMPONENT FSMController IS
+	PORT(
+		i_reset: IN	STD_LOGIC;
+        i_SSCS,i_MSC,i_MT,i_SSC,i_SST: IN STD_LOGIC;
+		i_clock: IN	STD_LOGIC;
+		o_main: OUT STD_LOGIC_VECTOR(2 downto 0);
+        o_side: OUT STD_LOGIC_VECTOR(2 downto 0);
+        o_enableMSC: OUT STD_LOGIC;
+        o_enableMT: OUT STD_LOGIC;
+        o_enableSSC: OUT STD_LOGIC;
+        o_enableSST: OUT STD_LOGIC;
+		o_Y: OUT STD_LOGIC_VECTOR(1 downto 0));
+    END COMPONENT;
+
+	COMPONENT enARdFF_2
+		PORT(
+			i_resetBar	: IN	STD_LOGIC;
+			i_d		: IN	STD_LOGIC;
+			i_enable	: IN	STD_LOGIC;
+			i_clock		: IN	STD_LOGIC;
+			o_q, o_qBar	: OUT	STD_LOGIC);
+	END COMPONENT;
+
+    COMPONENT debouncer_2 IS
+        PORT(
+            i_resetBar		: IN	STD_LOGIC;
+            i_clock			: IN	STD_LOGIC;
+            i_raw			: IN	STD_LOGIC;
+            o_clean			: OUT	STD_LOGIC);
+    END COMPONENT;
+
+    COMPONENT clk_div IS
+        PORT(
+            clock_25Mhz				: IN	STD_LOGIC;
+            clock_1MHz				: OUT	STD_LOGIC;
+            clock_100KHz			: OUT	STD_LOGIC;
+            clock_10KHz				: OUT	STD_LOGIC;
+            clock_1KHz				: OUT	STD_LOGIC;
+            clock_100Hz				: OUT	STD_LOGIC;
+            clock_10Hz				: OUT	STD_LOGIC;
+            clock_1Hz				: OUT	STD_LOGIC);	
+    END COMPONENT;
+
+    COMPONENT Counter4Bit IS
+	PORT(
+		i_reset: IN	STD_LOGIC;
+		i_enable: IN STD_LOGIC;
+		i_inc: IN	STD_LOGIC;
+		o_Value: OUT STD_LOGIC_VECTOR(3 downto 0));
+    END COMPONENT;
+
+    COMPONENT down_counter IS
+        PORT(
+            i_setBar, i_load	: IN	STD_LOGIC;
+            i_clock			: IN	STD_LOGIC;
+            o_Value			: OUT	STD_LOGIC_VECTOR(1 downto 0));
+    END COMPONENT;
+
+    COMPONENT fourBitComparator IS
+	PORT(
+		i_Ai, i_Bi			: IN	STD_LOGIC_VECTOR(3 downto 0);
+		o_GT, o_LT, o_EQ		: OUT	STD_LOGIC);
+    END COMPONENT;
+
+    COMPONENT fourBitMux2to1 IS
+        PORT(i0,i1: IN STD_LOGIC_VECTOR(3 downto 0);
+        i_select: IN STD_LOGIC;
+        o_y: OUT STD_LOGIC_VECTOR(3 downto 0));
+    END COMPONENT;
+
+    COMPONENT tens_dec_7seg IS
+        PORT(i_hexDigit : IN STD_LOGIC_VECTOR(3 downto 0);
+            o_segment_a, o_segment_b, o_segment_c, o_segment_d,
+            o_segment_e, o_segment_f, o_segment_g : OUT STD_LOGIC);
+    END COMPONENT;
+
+    COMPONENT dec_7seg IS
+        PORT(i_hexDigit	: IN STD_LOGIC_VECTOR(3 downto 0);
+            o_segment_a, o_segment_b, o_segment_c, o_segment_d, o_segment_e, 
+            o_segment_f, o_segment_g : OUT STD_LOGIC);
+    END COMPONENT;
+
+BEGIN
+	int_gClock <= i_clock;
+    --ClockDiv: clk_div
+    --    PORT MAP (clock_25Mhz => i_clock,
+    --            clock_1Hz => int_gClock);
+
+    Debouncer: debouncer_2
+        PORT MAP (
+            i_resetBar => NOT(i_reset),
+            i_clock => int_gClock,
+            i_raw => i_carSensor,
+            o_clean => int_debouncedSSCS);
+
+    SSCounter: Counter4Bit
+        PORT MAP(
+            i_reset => i_reset OR int_SSCMem,
+            i_enable => int_enableSSC,
+            i_inc => int_gClock,
+            o_Value => int_SSCounter);
+
+    CompareSSC: fourBitComparator
+        PORT MAP (
+            i_Ai => int_SSCounter, 
+            i_Bi => i_SSCmax,
+            o_EQ => int_SSCEqual);
+
+    --To reset the counter once it is equal to the max value, a DFF is used to memorize the output of compareSSC,
+    --so the counter gets reset after one clock cycle. The output of the memory is high during this clock cycle,
+    --giving the FSMController one clock cycle to change its state.
+    SSCounterEqualMem: enARdFF_2
+        PORT MAP(
+            i_resetBar => NOT(i_reset),
+            i_d => int_SSCEqual,
+            i_enable => '1',
+            i_clock	=> int_gClock,
+            o_q => int_SSCMem);
+    
+    MTCounter: down_counter
+        PORT MAP(
+            i_setBar => NOT(i_reset),
+            i_load => int_enableMT,
+            i_clock => int_gClock,
+            o_Value	=> int_MTCounter);
+    
+    int_MT <= NOT(int_MTCounter(1)) AND NOT(int_MTCounter(0));
+
+    MSCounter: Counter4Bit
+        PORT MAP(
+            i_reset => i_reset OR int_MSCMem,
+            i_enable => int_enableMSC,
+            i_inc => int_gClock,
+            o_Value => int_MSCounter);
+
+    CompareMSC: fourBitComparator
+        PORT MAP (
+            i_Ai => int_MSCounter, 
+            i_Bi => i_MSCmax,
+            o_EQ => int_MSCEqual);
+
+    --Same counter reset mechanism
+    MSCounterEqualMem: enARdFF_2
+        PORT MAP(
+            i_resetBar => NOT(i_reset),
+            i_d => int_MSCEqual,
+            i_enable => '1',
+            i_clock	=> int_gClock,
+            o_q => int_MSCMem);
+
+    SSTCounter: down_counter 
+        PORT MAP(
+            i_setBar => NOT(i_reset),
+            i_load => int_enableSST,
+            i_clock => int_gClock,
+            o_Value	=> int_SSTCounter);
+    
+    int_SST <= NOT(int_SSTCounter(1)) AND NOT(int_SSTCounter(0));
+
+    Controller: FSMController
+    PORT MAP(
+        i_reset => i_reset,
+        i_SSCS => int_debouncedSSCS,
+        i_MSC => int_MSCMem,
+        i_MT => int_MT,
+        i_SSC => int_SSCMem,
+        i_SST => int_SST,
+        i_clock => int_gClock,
+        o_main => int_main,
+        o_side => int_side,
+        o_enableMSC => int_enableMSC,
+        o_enableMT => int_enableMT,
+        o_enableSSC => int_enableSSC,
+        o_enableSST => int_enableSST,
+        o_Y => int_currentState);
+
+    MuxMain: fourBitMux2to1 
+    PORT MAP(
+		  i0(3 downto 2) => "00",
+        i0(1 downto 0) => int_MTCounter,
+        i1 => int_MSCounter,
+        i_select => int_enableMSC,
+        o_y => int_BCDMain);
+
+    BCDMainTen: tens_dec_7seg
+    PORT MAP(
+        i_hexDigit => int_BCDMain,
+        o_segment_a => o_sevenSegMainA(1), 
+        o_segment_b => o_sevenSegMainB(1),
+        o_segment_c => o_sevenSegMainC(1),
+        o_segment_d => o_sevenSegMainD(1),
+        o_segment_e => o_sevenSegMainE(1), 
+        o_segment_f => o_sevenSegMainF(1), 
+        o_segment_g => o_sevenSegMainG(1));
+
+    BCDMainUnit: dec_7seg
+    PORT MAP(
+        i_hexDigit => int_BCDMain,
+        o_segment_a => o_sevenSegMainA(0), 
+        o_segment_b => o_sevenSegMainB(0),
+        o_segment_c => o_sevenSegMainC(0),
+        o_segment_d => o_sevenSegMainD(0),
+        o_segment_e => o_sevenSegMainE(0), 
+        o_segment_f => o_sevenSegMainF(0), 
+        o_segment_g => o_sevenSegMainG(0));
+
+    MuxSide: fourBitMux2to1
+    PORT MAP(
+        i0(3 downto 2) => "00",
+        i0(1 downto 0) => int_SSTCounter,
+        i1 => int_SSCounter,
+        i_select => int_enableSSC,
+        o_y => int_BCDSide);
+
+    BCDSideTen: tens_dec_7seg
+    PORT MAP(
+        i_hexDigit => int_BCDSide,
+        o_segment_a => o_sevenSegSideA(1), 
+        o_segment_b => o_sevenSegSideB(1),
+        o_segment_c => o_sevenSegSideC(1),
+        o_segment_d => o_sevenSegSideD(1),
+        o_segment_e => o_sevenSegSideE(1), 
+        o_segment_f => o_sevenSegSideF(1), 
+        o_segment_g => o_sevenSegSideG(1));
+
+    BCDSideUnit: dec_7seg
+    PORT MAP(
+        i_hexDigit => int_BCDSide,
+        o_segment_a => o_sevenSegSideA(0), 
+        o_segment_b => o_sevenSegSideB(0),
+        o_segment_c => o_sevenSegSideC(0),
+        o_segment_d => o_sevenSegSideD(0),
+        o_segment_e => o_sevenSegSideE(0), 
+        o_segment_f => o_sevenSegSideF(0), 
+        o_segment_g => o_sevenSegSideG(0));
+
+
+
+	-- Output Driver
+	o_enableMSC <= int_enableMSC;
+	o_enableSSC <= int_enableSSC;
+	o_enableMT <= int_enableMT;
+	o_enableSST <= int_enableSST;
+	o_SSC <= int_SSCounter;
+	o_MSC <= int_MSCounter;
+	o_MT <= int_MTCounter;
+	o_SST <= int_SSTCounter;
+	o_currentState <= int_currentState;
+    o_main <= int_main;
+    o_side <= int_side;
+	o_MSCmem <= int_MSCMem;
+	o_SSCmem <= int_SSCMem;
+	
+END rtl;
